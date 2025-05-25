@@ -62,15 +62,6 @@ endif()
 pkg_check_modules(SODIUM REQUIRED libsodium)
 find_package(Threads REQUIRED)
 
-if(NOT LINUX)
-	pkg_check_modules(EPOLL_SHIM REQUIRED epoll-shim)
-	find_library(LIBARGP argp)
-
-	if(NOT LIBARGP)
-		  message(FATAL_ERROR "argp library not found")
-	endif()
-endif()
-
 include(CheckFunctionExists)
 include(CheckLibraryExists)
 include(CMakePushCheckState)
@@ -92,6 +83,17 @@ if(NOT HAVE_ARGP_PARSE)
 	endif()
 endif()
 
+check_function_exists(epoll_wait HAVE_EPOLL_WAIT)
+if(NOT HAVE_EPOLL_WAIT)
+	check_library_exists(epoll-shim epoll_wait "" EPOLL_SHIM)
+	if(EPOLL_SHIM)
+		pkg_check_modules(EPOLL_SHIM REQUIRED epoll-shim)
+	endif()
+else()
+set(EPOLL_SHIM_INCLUDE_DIRS "")
+set(EPOLL_SHIM_LIBRARIES "")
+endif()
+
 cmake_pop_check_state()
 
 add_custom_target(generate_git_version
@@ -110,10 +112,10 @@ add_custom_command(
 	VERBATIM
 )
 
-if(LINUX)
 target_include_directories(datum_gateway
 	PRIVATE
 	$<BUILD_INTERFACE:${PROJECT_BINARY_DIR}>
+	${EPOLL_SHIM_INCLUDE_DIRS}
 	${CURL_INCLUDE_DIRS}
 	${JANSSON_INCLUDE_DIRS}
 	${SODIUM_INCLUDE_DIRS}
@@ -129,6 +131,7 @@ target_link_libraries(datum_gateway
 	${POW_LIBS}
 	Threads::Threads
 	${ARGP_LIBS}
+	${EPOLL_SHIM_LIBRARIES}
 	${CURL_LIBRARIES} ${CURL_LDFLAGS} ${CURL_LDFLAGS_OTHER}
 	${JANSSON_LIBRARIES} ${JANSSON_LDFLAGS} ${JANSSON_LDFLAGS_OTHER}
 	${SODIUM_LIBRARIES} ${SODIUM_LDFLAGS} ${SODIUM_LDFLAGS_OTHER}
@@ -138,44 +141,6 @@ target_compile_options(datum_gateway
 	${CURL_CFLAGS} ${CURL_CFLAGS_OTHER}
 	${JANSSON_CFLAGS} ${JANSSON_CFLAGS_OTHER}
 	${SODIUM_CFLAGS} ${SODIUM_CFLAGS_OTHER}
-)
-
-else()
-target_include_directories(datum_gateway
-	PRIVATE
-	$<BUILD_INTERFACE:${PROJECT_BINARY_DIR}>
-	${CURL_INCLUDE_DIRS}
-	${MICROHTTPD_INCLUDE_DIRS}
-	${JANSSON_INCLUDE_DIRS}
-	${SODIUM_INCLUDE_DIRS}
-	${EPOLL_SHIM_INCLUDE_DIRS}
-)
-target_link_directories(datum_gateway
-	PUBLIC
-	${CURL_LIBRARY_DIRS}
-	${MICROHTTPD_LIBRARY_DIRS}
-	${JANSSON_LIBRARY_DIRS}
-	${SODIUM_LIBRARY_DIRS}
-	${EPOLL_SHIM_LIBRARY_DIRS}
-)
-target_link_libraries(datum_gateway
-	PUBLIC
-	${POW_LIBS}
-	Threads::Threads
-	${CURL_LIBRARIES} ${CURL_LDFLAGS} ${CURL_LDFLAGS_OTHER}
-	${MICROHTTPD_LIBRARIES} ${MICROHTTPD_LDFLAGS} ${MICROHTTPD_LDFLAGS_OTHER}
-	${JANSSON_LIBRARIES} ${JANSSON_LDFLAGS} ${JANSSON_LDFLAGS_OTHER}
-	${SODIUM_LIBRARIES} ${SODIUM_LDFLAGS} ${SODIUM_LDFLAGS_OTHER}
-	${EPOLL_SHIM_LIBRARIES} ${EPOLL_SHIM_LDFLAGS} ${EPOLL_SHIM_LDFLAGS_OTHER}
-	${LIBARGP}
-)
-target_compile_options(datum_gateway
-	PUBLIC
-	${CURL_CFLAGS} ${CURL_CFLAGS_OTHER}
-	${MICROHTTPD_CFLAGS} ${MICROHTTPD_CFLAGS_OTHER}
-	${JANSSON_CFLAGS} ${JANSSON_CFLAGS_OTHER}
-	${SODIUM_CFLAGS} ${SODIUM_CFLAGS_OTHER}
-	${EPOLL_SHIM_CFLAGS} ${EPOLL_SHIM_CFLAGS_OTHER}
 )
 
 if(ENABLE_API)

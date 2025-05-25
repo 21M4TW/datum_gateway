@@ -41,8 +41,10 @@
 #include "datum_logger.h"
 
 void datum_utils_init(void);
+uint64_t monotonic_time_seconds(void);
 uint64_t current_time_millis(void);
 uint64_t current_time_micros(void);
+uint64_t get_process_uptime_seconds(void);
 unsigned char hex2bin_uchar(const char *in);
 void build_hex_lookup(void);
 bool my_sha256(void *digest, const void *buffer, size_t length);
@@ -69,7 +71,12 @@ long double calc_network_difficulty(const char *bits_hex);
 unsigned char floorPoT(uint64_t x);
 uint64_t datum_siphash(const void *src, uint64_t sz, const unsigned char key[16]);
 uint64_t datum_siphash_mod8(const void *src, uint64_t sz, const unsigned char key[16]);
+uint64_t datum_atoi_strict_u64(const char *s, size_t size);
 int datum_atoi_strict(const char *s, size_t size);
+bool datum_str_to_bool_strict(const char *s, bool *out);
+char **datum_deepcopy_charpp(const char * const *p);
+void datum_reexec();
+bool datum_secure_strequals(const char *secret, const size_t secret_len, const char *guess);
 
 
 static inline

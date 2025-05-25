@@ -42,6 +42,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <ctype.h>
+#include <signal.h>
 #include <string.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -57,6 +58,7 @@
 const char *level_text[] = { "  ALL", "DEBUG", " INFO", " WARN", "ERROR", "FATAL" };
 
 volatile bool datum_logger_initialized = false;
+volatile bool log_reopen_signal = false;
 
 // configurable options
 bool log_to_file = false;
@@ -118,7 +120,7 @@ int datum_logger_queue_msg(const char *func, int level, const char *format, ...)
 	va_list args;
 	struct timeval tv;
 	struct tm tm_info;
-	char time_buffer[40];
+	char time_buffer[20];
 	
 	if ((level < log_level_console) && (level < log_level_file)) {
 		return 0;
@@ -202,7 +204,12 @@ int datum_logger_queue_msg(const char *func, int level, const char *format, ...)
 	msg->msg = &msg_buffer[buffer_id][msg_buf_idx[buffer_id]];
 	va_start(args, format);
 	i = vsnprintf(msg->msg, 1023, format, args);
-	msg->msg[i] = 0;
+
+	// clamp i to actual written value in order not to waste buffer space
+	if (i >= 1023) {
+		i = 1022;
+	}
+
 	va_end(args);
 	
 	if (((msg_buf_idx[buffer_id]+i+2) > msg_buf_maxsz) || (dlog_queue_next[buffer_id] >= dlog_queue_max_entries)) {
@@ -251,7 +258,7 @@ void * datum_logger_thread(void *ptr) {
 	struct tm tm_info_storage;
 	struct tm *tm_info;
 	DLOG_MSG *msg;
-	char time_buffer[40];
+	char time_buffer[20];
 	char log_line[1200];
 	FILE *log_handle = NULL;
 	time_t next_log_rotate = get_midnight_timestamp();
@@ -348,9 +355,9 @@ void * datum_logger_thread(void *ptr) {
 				tm_info = localtime_r(&seconds, &tm_info_storage);
 				strftime(time_buffer, sizeof(time_buffer), "%Y-%m-%d %H:%M:%S", tm_info);
 				if (log_calling_function) {
-					j = snprintf(log_line, 1199, "%s.%03d [%44s] %s: %s\n", time_buffer, millis, msg->calling_function, level_text[msg->level], msg->msg);
+					j = snprintf(log_line, sizeof(log_line), "%s.%03d [%44s] %s: %s\n", time_buffer, millis, msg->calling_function, level_text[msg->level], msg->msg);
 				} else {
-					j = snprintf(log_line, 1199, "%s.%03d %s: %s\n", time_buffer, millis, level_text[msg->level], msg->msg);
+					j = snprintf(log_line, sizeof(log_line), "%s.%03d %s: %s\n", time_buffer, millis, level_text[msg->level], msg->msg);
 				}
 				log_line[1199] = 0;
 				
@@ -384,14 +391,27 @@ void * datum_logger_thread(void *ptr) {
 			}
 		}
 		
+		if (log_reopen_signal && log_to_file && log_handle) {
+			log_reopen_signal = false;
+			DLOG(DLOG_LEVEL_DEBUG, "Reopening log file");
+			
+			fclose(log_handle);
+			
+			log_handle = fopen(log_file, "a");
+			if (!log_handle) {
+				DLOG(DLOG_LEVEL_FATAL, "Could not reopen log file (%s): %s!", log_file, strerror(errno));
+				panic_from_thread(__LINE__);
+			}
+			log_file_opened = time(NULL);
+		}
+		
 		if ((log_rotate_daily) && (log_to_file) && (log_handle)) {
 			if (next_log_rotate < (ets/1000000ULL)) {
 				DLOG(DLOG_LEVEL_INFO, "Rotating log file!");
 				
 				tm_info = localtime_r(&log_file_opened, &tm_info_storage);
 				strftime(time_buffer, sizeof(time_buffer), "%Y-%m-%d", tm_info);
-				snprintf(log_line, 1199, "%s.%s", log_file, time_buffer);
-				log_line[1199] = 0;
+				snprintf(log_line, sizeof(log_line), "%s.%s", log_file, time_buffer);
 				
 				fclose(log_handle);
 
@@ -431,7 +451,16 @@ void * datum_logger_thread(void *ptr) {
 	return NULL;
 }
 
+void datum_logger_hup_signal(int signum) {
+	log_reopen_signal = true;
+}
+
 int datum_logger_init(void) {
+	const struct sigaction hup_sigaction = { .sa_handler = datum_logger_hup_signal, };
+	if (0 != sigaction(SIGHUP, &hup_sigaction, NULL)) {
+		DLOG_ERROR("Failed to setup SIGHUP handler: %s", strerror(errno));
+	}
+	
 	pthread_t pthread_datum_logger_thread;
 	
 	pthread_create(&pthread_datum_logger_thread, NULL, datum_logger_thread, NULL);

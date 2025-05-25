@@ -34,6 +34,9 @@
  */
 
 #include <assert.h>
+#include <sys/types.h>
+#include <dirent.h>
+#include <fcntl.h>
 #include <sodium.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -48,13 +51,17 @@
 #include <stdint.h>
 #include <sys/time.h>
 #include <inttypes.h>
+#include <unistd.h>
 
+#include "datum_gateway.h"
+#include "datum_logger.h"
 #include "datum_utils.h"
 #include "thirdparty_base58.h"
 #include "thirdparty_segwit_addr.h"
 #include "datum_logger.h"
 
 volatile int panic_mode = 0;
+static uint64_t process_start_time = 0;
 
 void get_target_from_diff(unsigned char *result, uint64_t diff) {
 	uint64_t dividend_parts[4] = {0, 0, 0, 0x00000000FFFF0000};
@@ -76,8 +83,15 @@ void get_target_from_diff(unsigned char *result, uint64_t diff) {
 	}
 }
 
+uint64_t get_process_uptime_seconds() {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec - process_start_time;
+}
+
 void datum_utils_init(void) {
 	build_hex_lookup();
+	process_start_time = monotonic_time_seconds();
 }
 
 #ifdef __GNUC__
@@ -118,6 +132,12 @@ unsigned char floorPoT(uint64_t x) {
 	return pos;
 }
 #endif
+
+uint64_t monotonic_time_seconds(void) {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts); // SAFE from system time changes (e.g., NTP adjustments, manual clock changes)
+	return (uint64_t)ts.tv_sec;
+}
 
 uint64_t current_time_millis(void) {
 	struct timeval te;
@@ -706,16 +726,86 @@ uint64_t datum_siphash_mod8(const void *src, uint64_t sz, const unsigned char ke
 }
 
 // Uses a fixed-size buffer; positive only; digits only
-// Returns -1 on failure
-int datum_atoi_strict(const char * const s, const size_t size) {
-	if (!size) return -1;
+// Returns UINT64_MAX on failure
+uint64_t datum_atoi_strict_u64(const char * const s, const size_t size) {
+	if (!size) return UINT64_MAX;
 	assert(s);
-	int ret = 0;
+	uint64_t ret = 0;
 	for (size_t i = 0; i < size; ++i) {
-		if (s[i] < '0' || s[i] > '9') return -1;
+		if (s[i] < '0' || s[i] > '9') return UINT64_MAX;
 		int digit = s[i] - '0';
-		if (ret > (INT_MAX - digit) / 10) return -1;
+		if (ret > (UINT64_MAX - digit) / 10) return UINT64_MAX;
 		ret = (ret * 10) + digit;
 	}
 	return ret;
+}
+
+// Uses a fixed-size buffer; positive only; digits only
+// Returns -1 on failure
+int datum_atoi_strict(const char * const s, const size_t size) {
+	const uint64_t ret = datum_atoi_strict_u64(s, size);
+	return (ret == UINT64_MAX || ret > INT_MAX) ? -1 : ret;
+}
+
+// Currently accepts 0 and 1 only, but may add more later
+// Returns true if valid, actual value in *out
+bool datum_str_to_bool_strict(const char * const s, bool * const out) {
+	if (0 == strcmp(s, "0")) {
+		*out = false;
+		return true;
+	} else if (0 == strcmp(s, "1")) {
+		*out = true;
+		return true;
+	}
+	return false;
+}
+
+char **datum_deepcopy_charpp(const char * const * const p) {
+	size_t sz = sizeof(char*), n = 0;
+	for (const char * const *p2 = p; *p2; ++p2) {
+		sz += sizeof(char*) + strlen(*p2) + 1;
+		++n;
+	}
+	char **out = malloc(sz);
+	char *p3 = (void*)(&out[n + 1]);
+	out[n] = NULL;
+	for (size_t i = 0; i < n; ++i) {
+		const size_t item_sz = strlen(p[i]) + 1;
+		memcpy(p3, p[i], item_sz);
+		out[i] = p3;
+		p3 += item_sz;
+	}
+	assert(p3 - (char*)out == sz);
+	return out;
+}
+
+void datum_reexec() {
+	// FIXME: kill other threads (except logging?) before closing fds
+	
+	DIR * const D = opendir("/proc/self/fd");
+	if (D) {
+		for (struct dirent *ent; (ent = readdir(D)) != NULL; ) {
+			const int fd = datum_atoi_strict(ent->d_name, strlen(ent->d_name));
+			if (fd < 3) continue;
+			fcntl(fd, F_SETFD, FD_CLOEXEC);
+		}
+		closedir(D);
+	} else {
+		DLOG_ERROR("%s: Failed to close files, this could cause issues! (Is /proc mounted?)", __func__);
+	}
+	
+	execv((void*)datum_argv[0], (void*)datum_argv);
+	// execv shouldn't return!
+	
+	DLOG_FATAL("Failed to restart! We're too deep in to recover!");
+	abort();
+}
+
+bool datum_secure_strequals(const char *secret, const size_t secret_len, const char *guess) {
+	const size_t guess_len = strlen(guess);
+	size_t acc = secret_len ^ guess_len;
+	for (size_t i = 0; i < guess_len; ++i) {
+		acc |= ((size_t)guess[i]) ^ ((size_t)secret[i % guess_len]);
+	}
+	return !acc;
 }

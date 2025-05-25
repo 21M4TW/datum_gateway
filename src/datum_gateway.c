@@ -61,6 +61,8 @@
 #include "datum_coinbaser.h"
 #include "datum_protocol.h"
 
+const char *datum_gateway_config_filename = NULL;
+
 // ARGP stuff
 const char *argp_program_version = "datum_gateway " DATUM_PROTOCOL_VERSION;
 const char *argp_program_bug_address = "<jason@ocean.xyz>";
@@ -68,6 +70,7 @@ static char doc[] = "Decentralized Alternative Templates for Universal Mining - 
 static char args_doc[] = "";
 static struct argp_option options[] = {
 	{"help", '?', 0, 0, "Show custom help", 0},
+	{"example-conf", 0x100, NULL, 0, "Print an example configuration JSON file", 0},
 	{"usage", '?', 0, 0, "Show custom help", 0},
 	{"config", 'c', "FILE", 0, "Configuration JSON file"},
 	{0}
@@ -81,7 +84,8 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 	struct arguments *arguments = state->input;
 	switch (key) {
 		case '?': {
-			datum_gateway_help();
+			datum_print_banner();
+			datum_gateway_help(state->argv[0]);
 			exit(0);
 			break;
 		}
@@ -89,6 +93,10 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 			arguments->config_file = arg;
 			break;
 		}
+		case 0x100:  // example-conf
+			datum_gateway_example_conf();
+			exit(0);
+			break;
 		default:
 			return ARGP_ERR_UNKNOWN;
 	}
@@ -98,11 +106,23 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 static struct argp argp = {options, parse_opt, args_doc, doc};
 // END ARGP Stuff
 
+void datum_print_banner(void) {
+	printf("\n **************************************************************************\n");
+	printf(" * DATUM Gateway --- Copyright (c) 2024 Bitcoin Ocean, LLC & Jason Hughes *\n");
+	printf(" * git commit: %-58s *\n", GIT_COMMIT_HASH);
+	printf(" **************************************************************************\n\n");
+	fflush(stdout);
+}
+
 void handle_sigusr1(int sig) {
 	datum_blocktemplates_notifynew(NULL, 0);
 }
 
-int main(int argc, char **argv) {
+const char * const *datum_argv;
+
+int main(const int argc, const char * const * const argv) {
+	datum_argv = argv;
+	
 	struct arguments arguments;
 	pthread_t pthread_datum_stratum_v1;
 	pthread_t pthread_datum_gateway_template;
@@ -113,12 +133,6 @@ int main(int argc, char **argv) {
 	bool rejecting_stratum = false;
 	uint32_t next_reconnect_attempt_ms = 5000;
 	
-	printf("\n **************************************************************************\n");
-	printf(" * DATUM Gateway --- Copyright (c) 2024 Bitcoin Ocean, LLC & Jason Hughes *\n");
-	printf(" * git commit: %-58s *\n", GIT_COMMIT_HASH);
-	printf(" **************************************************************************\n\n");
-	fflush(stdout);
-	
 	// listen for block notifications
 	// set this up early so a notification doesn't break our init
 	sa.sa_handler = handle_sigusr1;
@@ -126,11 +140,15 @@ int main(int argc, char **argv) {
 	sigemptyset(&sa.sa_mask);
 	
 	if (sigaction(SIGUSR1, &sa, NULL) == -1) {
+		datum_print_banner();
 		DLOG_FATAL("Could not setup signal handler!");
 		perror("sigaction");
 		usleep(100000);
 		exit(1);
 	}
+	
+	// Ignore SIGPIPE. This is instead handled gracefully by datum_sockets
+	signal(SIGPIPE, SIG_IGN);
 	
 	srand(time(NULL)); // Not used for anything secure, so this is fine.
 	
@@ -138,15 +156,18 @@ int main(int argc, char **argv) {
 	datum_utils_init();
 	
 	arguments.config_file = "datum_gateway_config.json";  // Default config file
-	if (argp_parse(&argp, argc, argv, 0, 0, &arguments) != 0) {
+	if (argp_parse(&argp, argc, datum_deepcopy_charpp(argv), 0, 0, &arguments) != 0) {
+		datum_print_banner();
 		DLOG_FATAL("Error parsing arguments. Check --help");
 		exit(1);
 	}
+	datum_print_banner();
 	
 	if (datum_read_config(arguments.config_file) != 1) {
 		DLOG_FATAL("Error reading config file. Check --help");
 		exit(1);
 	}
+	datum_gateway_config_filename = arguments.config_file;
 	
 	// Initialize logger thread
 	datum_logger_init();
@@ -158,11 +179,13 @@ int main(int argc, char **argv) {
 	}
 	last_datum_protocol_connect_tsms = current_time_millis();
 	
+#ifdef ENABLE_API
 	if (datum_api_init()) {
 		DLOG_FATAL("Error initializing API interface");
 		usleep(100000);
 		exit(1);
 	}
+#endif
 	
 	if (datum_coinbaser_init()) {
 		DLOG_FATAL("Error initializing coinbaser thread");

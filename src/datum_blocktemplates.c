@@ -74,6 +74,8 @@ T_DATUM_TEMPLATE_DATA *template_data = NULL;
 
 int next_template_index = 0;
 
+const char *datum_blocktemplates_error = NULL;
+
 int datum_template_init(void) {
 	char *temp = NULL, *ptr = NULL;
 	int i,j;
@@ -334,7 +336,6 @@ T_DATUM_TEMPLATE_DATA *datum_gbt_parser(json_t *gbt) {
 
 void *datum_gateway_fallback_notifier(void *args) {
 	CURL *tcurl = NULL;
-	char userpass[512];
 	char req[512];
 	char p1[72];
 	p1[0] = 0;
@@ -348,11 +349,9 @@ void *datum_gateway_fallback_notifier(void *args) {
 	}
 	DLOG_DEBUG("Fallback notifier thread ready.");
 	
-	sprintf(userpass, "%s:%s", datum_config.bitcoind_rpcuser, datum_config.bitcoind_rpcpassword);
-	
 	while(1) {
-		sprintf(req, "{\"jsonrpc\":\"1.0\",\"id\":\"%"PRIu64"\",\"method\":\"getbestblockhash\",\"params\":[]}", current_time_millis());
-		gbbh = json_rpc_call(tcurl, datum_config.bitcoind_rpcurl, userpass, req);
+		snprintf(req, sizeof(req), "{\"jsonrpc\":\"1.0\",\"id\":\"%"PRIu64"\",\"method\":\"getbestblockhash\",\"params\":[]}", current_time_millis());
+		gbbh = bitcoind_json_rpc_call(tcurl, &datum_config, req);
 		if (gbbh) {
 			res_val = json_object_get(gbbh, "result");
 			if (!res_val) {
@@ -386,7 +385,6 @@ void *datum_gateway_template_thread(void *args) {
 	uint64_t i = 0;
 	char gbt_req[1024];
 	int j;
-	char userpass[512];
 	T_DATUM_TEMPLATE_DATA *t;
 	bool was_notified = false;
 	int wnc = 0;
@@ -403,6 +401,21 @@ void *datum_gateway_template_thread(void *args) {
 		panic_from_thread(__LINE__);
 	}
 	
+	{
+		unsigned char dummy[64];
+		if (!addr_2_output_script(datum_config.mining_pool_address, &dummy[0], 64)) {
+			if (datum_config.api_modify_conf) {
+				DLOG_ERROR("Could not generate output script for pool addr! Perhaps invalid? Configure via API/dashboard.");
+			} else {
+				DLOG_FATAL("Could not generate output script for pool addr! Perhaps invalid? This is bad.");
+				panic_from_thread(__LINE__);
+			}
+		}
+		while (!addr_2_output_script(datum_config.mining_pool_address, &dummy[0], 64)) {
+			usleep(50000);
+		}
+	}
+	
 	if (datum_config.bitcoind_notify_fallback) {
 		// start getbestblockhash poller thread as a backup for notifications
 		DLOG_DEBUG("Starting fallback block notifier");
@@ -414,29 +427,30 @@ void *datum_gateway_template_thread(void *args) {
 	char p1[72];
 	p1[0] = 0;
 	
-	sprintf(userpass, "%s:%s", datum_config.bitcoind_rpcuser, datum_config.bitcoind_rpcpassword);
-	
 	while(1) {
 		i++;
 		
 		// fetch latest template
-		sprintf(gbt_req, "{\"method\":\"getblocktemplate\",\"params\":[{\"rules\":[\"segwit\"]}],\"id\":%"PRIu64"}",(uint64_t)((uint64_t)time(NULL)<<(uint64_t)8)|(uint64_t)(i&255));
-		gbt = json_rpc_call(tcurl, datum_config.bitcoind_rpcurl, userpass, gbt_req);
+		snprintf(gbt_req, sizeof(gbt_req), "{\"method\":\"getblocktemplate\",\"params\":[{\"rules\":[\"segwit\"]}],\"id\":%"PRIu64"}",(uint64_t)((uint64_t)time(NULL)<<(uint64_t)8)|(uint64_t)(i&255));
+		gbt = bitcoind_json_rpc_call(tcurl, &datum_config, gbt_req);
 		
 		if (!gbt) {
+			datum_blocktemplates_error = "Could not fetch new template!";
 			DLOG_ERROR("Could not fetch new template from %s!", datum_config.bitcoind_rpcurl);
 			sleep(1);
 			continue;
 		} else {
 			res_val = json_object_get(gbt, "result");
 			if (!res_val) {
-				DLOG_ERROR("ERROR: Could not decode GBT result!");
+				datum_blocktemplates_error = "Could not decode GBT result!";
+				DLOG_ERROR("%s", datum_blocktemplates_error);
 			} else {
 				DLOG_DEBUG("DEBUG: calling datum_gbt_parser (new=%d)", was_notified?1:0);
 				t = datum_gbt_parser(res_val);
 				
 				if (t) {
-					DLOG_DEBUG("height: %d / value: %"PRIu64,t->height, t->coinbasevalue);
+					datum_blocktemplates_error = NULL;
+					DLOG_DEBUG("height: %lu / value: %"PRIu64, (unsigned long)t->height, t->coinbasevalue);
 					DLOG_DEBUG("--- prevhash: %s", t->previousblockhash);
 					DLOG_DEBUG("--- txn_count: %u / sigops: %u / weight: %u / size: %u", t->txn_count, t->txn_total_sigops, t->txn_total_weight, t->txn_total_size);
 					
@@ -446,7 +460,7 @@ void *datum_gateway_template_thread(void *args) {
 						update_stratum_job(t,true,JOB_STATE_EMPTY_PLUS);
 						strcpy(p1, t->previousblockhash);
 						was_notified = false;
-						DLOG_INFO("NEW NETWORK BLOCK: %s (%d)",t->previousblockhash,t->height);
+						DLOG_INFO("NEW NETWORK BLOCK: %s (%lu)", t->previousblockhash, (unsigned long)t->height);
 						
 						// sleep for a milisecond
 						// this will let other threads churn for a moment.  we wont get all the empty jobs blasted out in a milisecond anyway
@@ -485,7 +499,7 @@ void *datum_gateway_template_thread(void *args) {
 							if (!was_notified) {
 								DLOG_DEBUG("Multi notified for block we knew details about. (%s)", new_notify_blockhash);
 							} else {
-								DLOG_DEBUG("Notified, however new = %s, t->previousblockhash = %s, t->height = %d, new_notify_height = %d", new_notify_blockhash, t->previousblockhash, t->height, new_notify_height);
+								DLOG_DEBUG("Notified, however new = %s, t->previousblockhash = %s, t->height = %lu, new_notify_height = %d", new_notify_blockhash, t->previousblockhash, (unsigned long)t->height, new_notify_height);
 								
 								// Sometimes we call GBT before we get the signal from a blocknotify.  It's a bit of a race condition.
 								// Instead of freaking out, we'll just ignore things when we get a signal that results in the same block if it was

@@ -1675,7 +1675,7 @@ void *datum_protocol_client(void *args) {
 		
 		if (break_again) break;
 		
-		nfds = epoll_wait(epollfd, events, MAX_DATUM_CLIENT_EVENTS, 5);  // Wait for 5ms
+		nfds = epoll_wait(epollfd, events, MAX_DATUM_CLIENT_EVENTS, (i>1? 5: 100));  // Wait for 5ms except for first loop
 		
 		if (nfds == -1 && errno != EINTR) {
 			DLOG_FATAL("epoll_wait(...) error: %s",strerror(errno));

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.13)
 
-project(DATUM VERSION 0.2.3 LANGUAGES C)
+project(DATUM VERSION 0.3.1 LANGUAGES C)
 
 # Enable C23 if supported, else fall back to C11 for compatibility
 if(CMAKE_VERSION VERSION_LESS "3.21")
@@ -42,6 +42,9 @@ set(WEB_RESOURCES
 	www/home.html
 	www/clients_top.html
 	www/coinbaser_top.html
+	www/config.html
+	www/config_errors.html
+	www/config_restart.html
 	www/threads_top.html
 	www/foot.html
 	www/assets/post.js
@@ -155,3 +158,18 @@ endif()
 
 install(FILES README.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
 install(FILES doc/DATUM_recommended_setup-network_diagram.svg DESTINATION ${CMAKE_INSTALL_DOCDIR}/doc)
+
+set(PREGEN_DOC ${CMAKE_SOURCE_DIR}/doc/example_datum_gateway_config.json)
+install(FILES ${PREGEN_DOC} DESTINATION ${CMAKE_INSTALL_DOCDIR})
+
+if(NOT CMAKE_CROSSCOMPILING)
+	set(GENERATED_DOC ${CMAKE_BINARY_DIR}/CMakeFiles/generated_example_datum_gateway_config.json)
+	
+	add_custom_command(
+		TARGET datum_gateway
+		POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -DDATUM_GATEWAY=$<TARGET_FILE:datum_gateway> -DGENERATED_DOC=${GENERATED_DOC} -DPREGEN_DOC=${PREGEN_DOC} -P ${PROJECT_SOURCE_DIR}/cmake/script/VerifyExample.cmake
+		COMMENT "Verifying pre-generated documentation is up-to-date"
+		VERBATIM
+	)
+endif()
